@@ -1,0 +1,148 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum SplitType {
+  EQUAL
+  EXACT
+}
+
+enum ActivityType {
+  EXPENSE_ADDED
+  EXPENSE_EDITED
+  EXPENSE_DELETED
+  MEMBER_ADDED
+  MEMBER_REMOVED
+  SETTLEMENT_RECORDED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  memberships       GroupMember[]
+  ownedGroups       Group[]        @relation("GroupOwner")
+  expensesCreated   Expense[]      @relation("ExpenseCreator")
+  expensesPaid      Expense[]      @relation("ExpensePayer")
+  expenseShares     ExpenseShare[]
+  settlementsFrom   Settlement[]   @relation("SettlementFrom")
+  settlementsTo     Settlement[]   @relation("SettlementTo")
+  settlementsCreated Settlement[]  @relation("SettlementCreator")
+  refreshTokens     RefreshToken[]
+  activities        Activity[]     @relation("ActivityActor")
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  tokenHash String   @map("token_hash")
+  expiresAt DateTime @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+model Group {
+  id        String   @id @default(cuid())
+  name      String
+  ownerId   String   @map("owner_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  owner       User            @relation("GroupOwner", fields: [ownerId], references: [id])
+  members     GroupMember[]
+  expenses    Expense[]
+  settlements Settlement[]
+  activities  Activity[]
+
+  @@map("groups")
+}
+
+model GroupMember {
+  groupId  String   @map("group_id")
+  userId   String   @map("user_id")
+  joinedAt DateTime @default(now()) @map("joined_at")
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, userId])
+  @@map("group_members")
+}
+
+model Expense {
+  id          String   @id @default(cuid())
+  groupId     String   @map("group_id")
+  createdById String   @map("created_by_id")
+  description String
+  amount      Int
+  paidById    String   @map("paid_by_id")
+  expenseDate DateTime @map("expense_date")
+  splitType   SplitType @map("split_type")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  group   Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  creator User           @relation("ExpenseCreator", fields: [createdById], references: [id])
+  payer   User           @relation("ExpensePayer", fields: [paidById], references: [id])
+  shares  ExpenseShare[]
+
+  @@map("expenses")
+}
+
+model ExpenseShare {
+  id       String @id @default(cuid())
+  expenseId String @map("expense_id")
+  userId   String @map("user_id")
+  amount   Int
+
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([expenseId, userId])
+  @@map("expense_shares")
+}
+
+model Settlement {
+  id          String   @id @default(cuid())
+  groupId     String   @map("group_id")
+  fromUserId  String   @map("from_user_id")
+  toUserId    String   @map("to_user_id")
+  amount      Int
+  createdById String   @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  group   Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  fromUser User  @relation("SettlementFrom", fields: [fromUserId], references: [id])
+  toUser   User  @relation("SettlementTo", fields: [toUserId], references: [id])
+  creator  User  @relation("SettlementCreator", fields: [createdById], references: [id])
+
+  @@map("settlements")
+}
+
+model Activity {
+  id        String       @id @default(cuid())
+  groupId   String       @map("group_id")
+  actorId   String       @map("actor_id")
+  type      ActivityType
+  metadata  Json         @default("{}")
+  createdAt DateTime     @default(now()) @map("created_at")
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  actor User  @relation("ActivityActor", fields: [actorId], references: [id])
+
+  @@map("activities")
+}
