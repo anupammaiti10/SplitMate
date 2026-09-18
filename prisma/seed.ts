@@ -3,18 +3,19 @@ import * as bcrypt from 'bcrypt';
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import pg from "pg";
-import "dotenv/config"; // Ensures your .env variables load correctly
+import "dotenv/config";
 
-// 1. Create a native PG connection pool using your environment variable
+const databaseUrl = process.env.DATABASE_URL;
+
+if (!databaseUrl) {
+  throw new Error("DATABASE_URL environment variable is required");
+}
+
 const pool = new pg.Pool({
-  connectionString:
-    "postgresql://postgres:postgres@localhost:5432/splitmate?schema=public",
+  connectionString: databaseUrl,
 });
 
-// 2. Wrap it inside Prisma's driver adapter
 const adapter = new PrismaPg(pool);
-
-// 3. Pass the adapter straight into your Prisma Client instance
 const prisma = new PrismaClient({ adapter });
 
 async function main() {

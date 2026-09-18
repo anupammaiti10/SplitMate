@@ -84,6 +84,9 @@ export interface DashboardData {
   totalOwed: number;
   totalYouOwe: number;
   netBalance: number;
+  groupCount: number;
+  topDebtGroup: UserGroupBalance | null;
+  recentActivity: HistoryEntry[];
   groups: UserGroupBalance[];
 }
 
@@ -95,7 +98,7 @@ export interface HistoryEntry {
   description: string;
   amount: number;
   date: string;
-  counterparty?: User;
+  counterparty?: { userId: string; name: string };
 }
 
 export interface PaginatedResponse<T> {

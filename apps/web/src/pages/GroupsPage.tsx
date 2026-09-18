@@ -1,17 +1,9 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { clsx } from "clsx";
 import api from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
 import type { Group, ApiResponse } from "@/types";
-
-function formatCurrency(paise: number): string {
-  return `₹${(paise / 100).toLocaleString("en-IN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-}
 
 function Skeleton() {
   return (

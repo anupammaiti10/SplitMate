@@ -9,7 +9,6 @@ import type {
   GroupDetail,
   Expense,
   MemberBalance,
-  SimplifiedDebt,
   Activity,
   Settlement,
   PaginatedResponse,
@@ -957,6 +956,8 @@ export default function GroupDetailPage() {
   const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
   const [expensePage, setExpensePage] = useState(1);
   const [activityPage, setActivityPage] = useState(1);
+  const [expenseSortBy, setExpenseSortBy] = useState<"createdAt" | "expenseDate" | "amount">("createdAt");
+  const [expenseSortOrder, setExpenseSortOrder] = useState<"asc" | "desc">("desc");
 
   const PAGE_SIZE = 10;
 
@@ -991,10 +992,10 @@ export default function GroupDetailPage() {
   });
 
   const expensesQuery = useQuery<PaginatedResponse<Expense>>({
-    queryKey: ["groupExpenses", groupId, expensePage],
+    queryKey: ["groupExpenses", groupId, expensePage, expenseSortBy, expenseSortOrder],
     queryFn: async () => {
       const response = await api.get<ApiResponse<PaginatedResponse<Expense>>>(
-        `/groups/${groupId}/expenses?page=${expensePage}&pageSize=${PAGE_SIZE}`
+        `/groups/${groupId}/expenses?page=${expensePage}&pageSize=${PAGE_SIZE}&sortBy=${expenseSortBy}&sortOrder=${expenseSortOrder}`
       );
       return response.data.data;
     },
@@ -1235,27 +1236,51 @@ export default function GroupDetailPage() {
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
           <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
-            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
-              <h2 className="text-lg font-semibold text-gray-900">Expenses</h2>
-              <button
-                onClick={() => setShowAddExpense(true)}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 transition"
-              >
-                <svg
-                  className="h-4 w-4"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M12 4.5v15m7.5-7.5h-15"
-                  />
-                </svg>
-                Add Expense
-              </button>
+            <div className="border-b border-gray-100 px-6 py-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-gray-900">Expenses</h2>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={`${expenseSortBy}-${expenseSortOrder}`}
+                    onChange={(e) => {
+                      const [by, order] = e.target.value.split("-") as [
+                        "createdAt" | "expenseDate" | "amount",
+                        "asc" | "desc"
+                      ];
+                      setExpenseSortBy(by);
+                      setExpenseSortOrder(order);
+                      setExpensePage(1);
+                    }}
+                    className="rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs font-medium text-gray-700 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition"
+                  >
+                    <option value="createdAt-desc">Newest first</option>
+                    <option value="createdAt-asc">Oldest first</option>
+                    <option value="expenseDate-desc">Date (newest)</option>
+                    <option value="expenseDate-asc">Date (oldest)</option>
+                    <option value="amount-desc">Amount (high to low)</option>
+                    <option value="amount-asc">Amount (low to high)</option>
+                  </select>
+                  <button
+                    onClick={() => setShowAddExpense(true)}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 transition"
+                  >
+                    <svg
+                      className="h-4 w-4"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M12 4.5v15m7.5-7.5h-15"
+                      />
+                    </svg>
+                    Add Expense
+                  </button>
+                </div>
+              </div>
             </div>
             <div className="p-6">
               {expensesQuery.isLoading ? (
@@ -1554,7 +1579,6 @@ export default function GroupDetailPage() {
               ) : (
                 <SimplifiedDebtsList
                   balances={balancesQuery.data}
-                  members={members}
                 />
               )}
             </div>
@@ -1672,10 +1696,8 @@ export default function GroupDetailPage() {
 
 function SimplifiedDebtsList({
   balances,
-  members,
 }: {
   balances: MemberBalance[];
-  members: { id: string; name: string }[];
 }) {
   const debtors = balances
     .filter((b) => b.netBalance < 0)

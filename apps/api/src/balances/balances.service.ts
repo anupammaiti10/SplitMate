@@ -227,10 +227,23 @@ export class BalancesService {
       netBalance += groupNet;
     }
 
+    const debtGroups = groups.filter((g) => g.netBalance < 0);
+    const topDebtGroup =
+      debtGroups.length > 0
+        ? debtGroups.reduce((worst, g) =>
+            g.netBalance < worst.netBalance ? g : worst
+          )
+        : null;
+
+    const recentActivity = await this.getUserHistory(userId);
+
     return {
       totalOwed,
       totalYouOwe,
       netBalance,
+      groupCount: groups.length,
+      topDebtGroup,
+      recentActivity: recentActivity.slice(0, 5),
       groups,
     };
   }

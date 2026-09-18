@@ -24,10 +24,10 @@ export class PaginationDto {
   sortOrder?: 'asc' | 'desc' = 'desc';
 
   get skip(): number {
-    return (this.page - 1) * this.pageSize;
+    return ((this.page ?? 1) - 1) * (this.pageSize ?? 20);
   }
 
   get take(): number {
-    return this.pageSize;
+    return this.pageSize ?? 20;
   }
 }

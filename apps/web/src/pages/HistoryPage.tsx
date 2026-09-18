@@ -162,7 +162,7 @@ export default function HistoryPage() {
 
                       {entry.counterparty && (
                         <p className="mt-1 text-xs text-gray-400">
-                          {entry.type === 'expense' ? 'with' : 'to'} {entry.counterparty}
+                          {entry.type === 'expense' ? 'with' : 'to'} {entry.counterparty.name}
                         </p>
                       )}
                     </div>

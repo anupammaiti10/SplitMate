@@ -18,7 +18,7 @@ export class ActivitiesService {
         groupId,
         actorId,
         type,
-        metadata,
+        metadata: metadata as any,
       },
     });
   }

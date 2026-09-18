@@ -31,6 +31,9 @@ export interface UserOverallBalanceResponse {
   totalOwed: number;
   totalYouOwe: number;
   netBalance: number;
+  groupCount: number;
+  topDebtGroup: UserGroupBalance | null;
+  recentActivity: HistoryEntry[];
   groups: UserGroupBalance[];
 }
 
