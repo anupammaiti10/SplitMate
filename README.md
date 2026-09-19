@@ -1,6 +1,6 @@
 # SplitMate
 
-A Splitwise-style shared-expense application built with React, NestJS, PostgreSQL, and Socket.IO.
+A Splitwise-style shared-expense splitting application. Create groups with friends, log expenses (who paid, how to split), and let the app calculate who owes whom. It handles balance tracking, deterministic rounding for uneven splits, debt simplification to minimize transactions, and settlement recording — all with real-time updates so every group member sees changes instantly. Built as a full-stack TypeScript monorepo with React, NestJS, PostgreSQL, and Socket.IO.
 
 ## Features
 
@@ -18,39 +18,203 @@ A Splitwise-style shared-expense application built with React, NestJS, PostgreSQ
 - Dashboard with aggregated balances, group count, highest-debt group, and recent activity feed
 - Frontend: loading states, inline validation errors, disabled buttons during requests
 
-## Architecture
+## How to Run
 
-- **Frontend:** React + TypeScript + Vite + Tailwind CSS + TanStack Query + Socket.IO client
-- **Backend:** NestJS + TypeScript + Socket.IO
-- **Database:** PostgreSQL with Prisma ORM
-- **Authentication:** JWT access tokens (15min) + refresh tokens (30d), bcrypt password hashing
-- **Docker:** Multi-stage builds — API (Node 20 Alpine + tini), Frontend (Nginx Alpine), PostgreSQL 16
+### Clean Clone (Docker — recommended)
+
+```bash
+git clone <repo-url> && cd SplitMate
+docker compose up --build
+```
+
+- **Frontend:** http://localhost (nginx, port 80)
+- **Backend API:** http://localhost:3001 (proxied through nginx)
+- **PostgreSQL:** localhost:5432
+
+The API container runs Prisma migrations and seeds the database automatically on first start. Three test users are created (Alice, Bob, Charlie — all with password `Test1234`).
+
+To stop and remove volumes:
+
+```bash
+docker compose down -v
+```
+
+### Clean Clone (Local Development)
+
+```bash
+git clone <repo-url> && cd SplitMate
+
+# Start PostgreSQL
+docker compose up -d postgres
+
+# Install dependencies (npm workspaces installs root + apps/api + apps/web)
+npm install
+
+# Set up database
+cd prisma
+npx prisma migrate dev
+npx prisma generate
+cd ..
+npm run seed
+
+# Start both API and frontend in development mode
+npm run dev
+```
+
+- **API:** http://localhost:3001 (ts-node-dev with hot reload)
+- **Frontend:** http://localhost:5173 (Vite dev server with HMR)
+- Vite proxies `/api` and `/socket.io` to localhost:3001
+
+### Environment Variables
+
+```env
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/splitmate?schema=public"
+JWT_ACCESS_SECRET="your-access-token-secret-change-in-production"
+JWT_REFRESH_SECRET="your-refresh-token-secret-change-in-production"
+ACCESS_TOKEN_EXPIRES_IN="15m"
+REFRESH_TOKEN_EXPIRES_IN="30d"
+PORT=3001
+CLIENT_URL="http://localhost:5173"
+```
+
+## Stack Choice and Why
+
+| Layer | Technology | Why |
+|-------|-----------|-----|
+| **Frontend** | React 18 + TypeScript + Vite | React is the team's strongest framework. Vite gives instant HMR and fast builds. TypeScript catches type errors at compile time. |
+| **Styling** | Tailwind CSS | Rapid UI development with utility classes. No CSS-in-JS runtime overhead. Consistent design tokens. |
+| **Data Fetching** | TanStack Query (React Query) | Handles caching, refetching, optimistic updates, and loading/error states declaratively. Reduces boilerplate for the dozens of API calls in the app. |
+| **Backend** | NestJS + TypeScript | Opinionated structure (modules, controllers, services, guards) scales well. Dependency injection makes testing easier. TypeScript shared with frontend. |
+| **ORM** | Prisma | Type-safe database queries. Schema-as-code with migrations. Eliminates raw SQL string errors. |
+| **Database** | PostgreSQL 16 | ACID compliance is critical for financial data. JSONB support for activity metadata. Proven reliability. |
+| **Real-time** | Socket.IO | Built-in reconnection, room-based event scoping, and HTTP long-polling fallback. Avoids reimplementing heartbeat and fallback logic from scratch. |
+| **Auth** | Passport.js + JWT | Stateless tokens for API auth. Refresh token rotation for security without requiring server-side sessions. |
+| **Monorepo** | npm workspaces | Shared `package.json` at root. Single `npm install` for everything. No extra tooling like Turborepo needed at this scale. |
+| **Containerization** | Docker Compose | Reproducible dev and production environments. Multi-stage builds keep images small. |
 
 ## Data Model
 
-| Entity | Fields |
-|--------|--------|
-| **User** | id, name, email (unique), passwordHash, createdAt, updatedAt |
-| **RefreshToken** | id, userId (FK → User, cascade delete), tokenHash, expiresAt, revokedAt, createdAt |
-| **Group** | id, name, ownerId (FK → User), createdAt, updatedAt |
-| **GroupMember** | groupId (FK → Group, cascade delete), userId (FK → User, cascade delete), joinedAt — composite PK (groupId, userId) |
-| **Expense** | id, groupId (FK → Group, cascade delete), createdById (FK → User), description, amount (integer paise), paidById (FK → User), expenseDate, splitType (EQUAL/EXACT), createdAt, updatedAt |
-| **ExpenseShare** | id, expenseId (FK → Expense, cascade delete), userId (FK → User, cascade delete), amount (integer paise) — unique constraint (expenseId, userId) |
-| **Settlement** | id, groupId (FK → Group, cascade delete), fromUserId (FK → User), toUserId (FK → User), amount (integer paise), createdById (FK → User), createdAt |
-| **Activity** | id, groupId (FK → Group, cascade delete), actorId (FK → User), type (enum), metadata (JSON), createdAt |
+```
+┌──────────┐       ┌──────────────┐       ┌──────────┐
+│  users   │──1:N──│ group_members │──N:1──│  groups  │
+│          │       │  (junction)  │       │          │
+│ id (PK)  │       │ groupId+     │       │ id (PK)  │
+│ name     │       │   userId     │       │ name     │
+│ email    │       │   (comp PK)  │       │ ownerId  │
+│ password │       └──────────────┘       └────┬─────┘
+│ hash     │                                   │
+└──┬───┬───┘                                   │
+   │   │                                       │
+   │   │  ┌──────────────┐  ┌──────────────┐  │  ┌──────────────┐
+   │   │  │  expenses    │  │  settlements  │  │  │  activities  │
+   │   │  │              │  │              │  │  │              │
+   │   │  │ id (PK)     │  │ id (PK)     │  │  │ id (PK)     │
+   │   ├──│ createdById  │  │ fromUserId   │  ├──│ actorId     │
+   │   ├──│ paidById     │  │ toUserId     │  │  │ type (enum) │
+   │   │  │ groupId (FK) │──│ groupId (FK) │  │  │ groupId(FK) │
+   │   │  │ amount       │  │ amount       │  │  │ metadata    │
+   │   │  │ splitType    │  │ createdById  │  │  │ (JSONB)     │
+   │   │  └──────┬───────┘  └──────────────┘  │  └──────────────┘
+   │   │         │                             │
+   │   │  ┌──────┴───────┐                    │
+   │   │  │expense_shares│                    │
+   │   │  │              │                    │
+   │   │  │ id (PK)     │                    │
+   │   ├──│ userId       │                    │
+   │   │  │ expenseId(FK)│                    │
+   │   │  │ amount       │                    │
+   │   │  └──────────────┘                    │
+   │   │                                      │
+   │   │  ┌──────────────┐                    │
+   │   │  │refresh_tokens│                    │
+   │   │  │              │                    │
+   │   └──│ userId (FK)  │                    │
+   │      │ tokenHash    │                    │
+   │      │ expiresAt    │                    │
+   │      │ revokedAt    │                    │
+   │      └──────────────┘                    │
+   │                                          │
+   └──────────────────────────────────────────┘
+```
 
-### Activity Types (enum)
+### Tables
 
-`EXPENSE_ADDED`, `EXPENSE_EDITED`, `EXPENSE_DELETED`, `MEMBER_ADDED`, `MEMBER_REMOVED`, `SETTLEMENT_RECORDED`
+| Table | Purpose |
+|-------|---------|
+| `users` | id, name, email (unique), password_hash, created_at, updated_at |
+| `refresh_tokens` | id, user_id (FK → users, CASCADE DELETE), token_hash, expires_at, revoked_at, created_at |
+| `groups` | id, name, owner_id (FK → users), created_at, updated_at |
+| `group_members` | group_id + user_id (composite PK, both FKs with CASCADE DELETE), joined_at |
+| `expenses` | id, group_id (FK → groups, CASCADE DELETE), created_by_id, paid_by_id, description, amount (INTEGER paise), expense_date, split_type (EQUAL/EXACT), created_at, updated_at |
+| `expense_shares` | id, expense_id (FK → expenses, CASCADE DELETE), user_id (FK, CASCADE DELETE), amount (INTEGER paise). Unique constraint on (expense_id, user_id) |
+| `settlements` | id, group_id (FK → groups, CASCADE DELETE), from_user_id, to_user_id, amount (INTEGER paise), created_by_id, created_at |
+| `activities` | id, group_id (FK → groups, CASCADE DELETE), actor_id, type (EXPENSE_ADDED/EXPENSE_EDITED/EXPENSE_DELETED/MEMBER_ADDED/MEMBER_REMOVED/SETTLEMENT_RECORDED), metadata (JSONB), created_at |
 
-### Relationships
+### How They Relate
 
-- A **User** can own many **Groups** and be a member of many **Groups** via **GroupMember**.
-- A **Group** has many **Expenses**, **Settlements**, **Activities**, and **Members** (via GroupMember).
-- An **Expense** belongs to one **Group**, is created by one **User**, paid by one **User**, and has many **ExpenseShares**.
-- An **ExpenseShare** links an **Expense** to a **User** with an amount owed.
+- A **User** can own many **Groups** (one-to-many via `owner_id`) and be a member of many **Groups** (many-to-many via `group_members`).
+- A **Group** has many **Expenses**, **Settlements**, **Activities**, and **Members** (via `group_members`).
+- An **Expense** belongs to one **Group**, is created by one **User**, paid by one **User**, and has many **ExpenseShares** (one per participant).
+- An **ExpenseShare** links an **Expense** to a **User** with the amount that user owes for that expense.
 - A **Settlement** records a payment from one **User** to another within a **Group**, created by one **User**.
-- All child records (expenses, shares, settlements, activities, memberships) cascade-delete when their parent group or user is removed. This prevents orphaned references.
+- An **Activity** logs every mutation (expense added/edited/deleted, member added/removed, settlement recorded) with the actor and metadata.
+- All child records cascade-delete when their parent group or user is removed — no orphaned references.
+
+## Financial Precision
+
+### How Money is Stored
+
+All amounts are stored as **INTEGER columns representing paise** (1/100 of a rupee). No floating-point arithmetic is used anywhere in the system.
+
+- **Frontend → API:** Users type decimal amounts (e.g., `100.50`). Before sending, the value is converted: `Math.round(parseFloat(amountStr) * 100)`. So `₹100.50` becomes `10050` paise.
+- **API → Database:** The integer is stored directly. Prisma schema declares `amount Int`, SQL migration creates `amount INTEGER NOT NULL`.
+- **Database → Frontend:** The integer is divided by 100 for display using `formatCurrency()`.
+
+**Why integers?** Floating-point numbers cannot exactly represent most decimal values. `0.1 + 0.2 = 0.30000000000000004` in IEEE 754. For a financial app where every paisa counts, this is unacceptable. Integer paise guarantee exact arithmetic with zero precision loss.
+
+### Rounding Rule for Uneven Splits
+
+When splitting an amount equally among N participants, the division may not be exact. The algorithm distributes the remainder deterministically:
+
+```
+baseShare = floor(totalAmount / participantCount)
+remainder = totalAmount - (baseShare * participantCount)
+```
+
+Participant IDs are sorted lexicographically. The first `remainder` participants each get `baseShare + 1`. All others get `baseShare`. The shares always sum to the exact total — no money is lost or invented.
+
+**Examples:**
+- ₹900 split among 3 → base = 300, remainder = 0 → each pays ₹300
+- ₹100 split among 3 → base = 33, remainder = 1 → first user pays ₹34, others pay ₹33. Total: 34 + 33 + 33 = 100
+- ₹7 split among 3 → base = 2, remainder = 1 → first user pays ₹3, others pay ₹2. Total: 3 + 2 + 2 = 7
+
+For **EXACT** splits, the user specifies each participant's share explicitly. The API validates that all shares sum to the total amount.
+
+### Balance Calculation
+
+For each user in a group, computed on-the-fly (not stored):
+
+```
+netBalance = totalPaid - totalOwed + totalSettledReceived - totalSettledSent
+```
+
+- **Positive balance:** the user is owed money (creditor)
+- **Negative balance:** the user owes money (debtor)
+- **Zero:** fully settled
+
+### Debt Simplification
+
+Uses a greedy matching algorithm to minimize the number of transactions needed to settle all debts:
+
+1. Calculate net balance for each user in the group
+2. Partition into debtors (negative balance) and creditors (positive balance)
+3. Sort debtors ascending (most negative first) and creditors descending (most positive first)
+4. Transfer `min(|debtor|, creditor)` from debtor to creditor
+5. Advance pointers and repeat until all balances are zero
+
+**Example:**
+- Alice owes ₹500, Bob is owed ₹300, Charlie is owed ₹200
+- Alice pays Bob ₹300, Alice pays Charlie ₹200 → 2 transactions instead of 4
 
 ## Authentication
 
@@ -64,86 +228,35 @@ Passwords are validated on both frontend and backend with the same rules:
 
 Passwords are hashed with **bcrypt** (10 salt rounds). Plaintext passwords are never stored or transmitted after hashing.
 
-### JWT Token Flow
+### Refresh Token Flow
 
-- **Access tokens:** 15-minute lifetime, signed with `JWT_ACCESS_SECRET`
-- **Refresh tokens:** 30-day lifetime, signed with `JWT_REFRESH_SECRET`
+**What is stored where:**
 
-**How tokens are stored and why:**
+| What | Where | Details |
+|------|-------|---------|
+| Access token (raw) | Frontend JS variable + `localStorage` (`splitmate_access_token`) | 15-minute lifetime |
+| Refresh token (raw) | Frontend `localStorage` (`splitmate_refresh_token`) | 30-day lifetime |
+| Refresh token (hash) | `refresh_tokens` table in PostgreSQL | bcrypt hash, with `expiresAt` and `revokedAt` |
 
-- **Access token:** Stored in a JavaScript variable (`let accessToken`) in the frontend `api.ts` module. This keeps it out of `localStorage` (not accessible to XSS via `document.cookie`), while still persisting across page loads by syncing to `localStorage` on login.
-- **Refresh token:** Stored in `localStorage` under key `splitmate_refresh_token`. Chosen over cookies because the app uses a cross-origin setup (Vite dev server on :5173, API on :3001) and HttpOnly cookies would require extra configuration. The refresh token is sent in the request body (not as a cookie).
-- **On the server:** Refresh tokens are stored as bcrypt hashes in the `refresh_tokens` table. The raw token is only ever sent once (in the login/register response). On refresh, the old token is revoked (rotation) and a new one is issued.
+**What happens on expiry (step by step):**
 
-**Refresh flow on 401:**
+1. API returns **401** (expired access token)
+2. Axios interceptor catches the 401. A **mutex** (`isRefreshing`) prevents multiple simultaneous refresh attempts.
+3. If already refreshing, the failed request is pushed to a **queue** (`failedQueue`). All queued requests will retry once the new token arrives.
+4. Interceptor calls `POST /api/auth/refresh` with the refresh token in the request body.
+5. **Server-side:** The refresh token is hashed with bcrypt and looked up in `refresh_tokens`. If a matching non-revoked, non-expired token exists:
+   - It is **revoked** (old token is invalidated — token rotation)
+   - A new access + refresh token pair is generated
+   - The new refresh token hash is stored in the database
+   - Both new tokens are returned
+6. **Frontend:** Stores the new tokens, processes the queue (retries all queued requests with the new access token), and retries the original failed request.
+7. **On failure:** Tokens are cleared, all queued requests are rejected, and the user is redirected to `/login`.
 
-1. API returns 401 (expired access token)
-2. Frontend interceptor catches the 401, queues the failed request
-3. Interceptor calls `POST /api/auth/refresh` with the refresh token
-4. On success: stores new tokens, retries all queued requests with new access token
-5. On failure: clears tokens, redirects to `/login`
-6. A mutex (`isRefreshing`) prevents multiple simultaneous refresh attempts
-
-## Authorization
-
-- Every protected endpoint uses `JwtAuthGuard` which verifies the JWT and extracts `userId`
-- Public endpoints (`/auth/register`, `/auth/login`) are decorated with `@Public()` and skip JWT verification
-- Group operations (`GET /groups`, `POST /groups/:id/expenses`, etc.) verify that the requesting user is a member of the group via `GroupMember` lookup
-- Owner-only operations (add/remove members, delete group) verify `group.ownerId === userId` server-side
-- Expense edit/delete checks `expense.createdById === userId` OR `group.ownerId === userId` server-side
-- Unauthenticated requests to protected endpoints return 401 immediately
-
-## Financial Precision
-
-All amounts are stored as **integer minor units (paise)**. No floating-point arithmetic is used anywhere in the system. The frontend converts display values (e.g., `100.50`) to paise (`10050`) before sending to the API, and converts back for display.
-
-## Equal Split Rounding
-
-When splitting an amount equally, the remainder is distributed deterministically so that shares always sum to the exact total:
-
-```
-baseAmount = floor(totalAmount / participantCount)
-remainder = totalAmount - (baseAmount * participantCount)
-```
-
-The first `remainder` participants (sorted by ascending user ID) receive `baseAmount + 1`. All others receive `baseAmount`.
-
-**Example:** ₹900 split among 3 users → base = 300, remainder = 0 → each pays ₹300.
-**Example:** ₹100 split among 3 users → base = 33, remainder = 1 → first user pays ₹34, others pay ₹33. Total = 34 + 33 + 33 = 100.
-
-## Balance Calculation
-
-For each user in a group, computed on-the-fly (not stored):
-
-```
-netBalance = totalPaid - totalOwed + totalSettledReceived - totalSettledSent
-```
-
-- **Positive balance:** the user is owed money (creditor)
-- **Negative balance:** the user owes money (debtor)
-- **Zero:** fully settled
-
-## Debt Simplification
-
-Uses a greedy matching algorithm to minimize the number of transactions needed to settle all debts:
-
-1. Calculate net balance for each user in the group
-2. Partition into debtors (negative balance) and creditors (positive balance)
-3. Sort debtors ascending (most negative first) and creditors descending (most positive first)
-4. Transfer `min(|debtor|, creditor)` from debtor to creditor
-5. Advance pointers and repeat until all balances are zero
-
-**Example:**
-- Alice owes ₹500, Bob is owed ₹300, Charlie is owed ₹200
-- Alice pays Bob ₹300, Alice pays Charlie ₹200 → 2 transactions instead of potential 4
+**Why this design?** Token rotation means a stolen refresh token is only valid for one use. The old token is revoked on the server, so if an attacker tries to reuse it, the legitimate user's next refresh will fail — alerting both parties.
 
 ## WebSocket (Real-time Updates)
 
-### Choice: Socket.IO
-
-Socket.IO was chosen over native `ws` because it provides automatic reconnection, room-based event scoping, and fallback to HTTP long-polling — all built in. The alternative (raw WebSocket) would require implementing reconnection, heartbeat, and room management manually.
-
-### Authentication
+### How Authentication Works
 
 On connection, the client sends the JWT access token via the `auth` handshake option:
 
@@ -161,17 +274,17 @@ The gateway (`realtime.gateway.ts`) verifies the token in `handleConnection`:
 3. If valid, store `client.data.userId = payload.sub` and keep the connection
 4. If invalid, log a warning and call `client.disconnect()`
 
-### Event Scoping (No Global Broadcast)
+### How Events Reach Only the Right Group Members
 
 Events are **never** broadcast globally. They are scoped to group rooms:
 
 1. When a client wants to receive events for a group, they emit `joinGroup` with `{ groupId }`
-2. The gateway verifies the user is a member of that group via `GroupMember` lookup
+2. The gateway verifies the user is a member of that group via `GroupMember` lookup in the database
 3. If authorized, the client joins Socket.IO room `group:{groupId}`
 4. All mutations (expense created, settlement recorded, etc.) emit to `group:{groupId}` room only
-5. A user's dashboard updates via the client-side query invalidation after receiving group events
+5. Non-members of that group never join the room and never receive the events
 
-This means a user only receives events for groups they are a member of. Non-members hear nothing.
+This means a user only receives events for groups they are a member of. A user in Group A will never see events from Group B.
 
 ### Events
 
@@ -186,139 +299,96 @@ This means a user only receives events for groups they are a member of. Non-memb
 | `group:created` | Group created | `{ groupId, name, createdBy }` |
 | `group:deleted` | Group deleted | `{ groupId, deletedBy }` |
 
-### Reconnection Handling
+### Disconnect and Reconnect Handling
 
-Socket.IO enables automatic reconnection by default (exponential backoff). When the socket reconnects:
-- The client re-emits `joinGroup` for any active group view
-- The dashboard refetches on reconnect via the `connect` event listener
-- TanStack Query's `refetchOnWindowFocus` and `refetchOnReconnect` ensure stale data is refreshed
-- If the socket drops entirely, the app still works — all operations are REST-based, and the user can refresh to get current state
+- **Disconnect:** The gateway cleans up the `connectedUsers` map entry. Socket.IO handles the rest.
+- **Reconnect:** Socket.IO uses automatic reconnection with exponential backoff. When the socket reconnects:
+  - The client re-emits `joinGroup` for any active group view
+  - The dashboard refetches on reconnect via the `connect` event listener
+  - TanStack Query's `refetchOnWindowFocus` and `refetchOnReconnect` ensure stale data is refreshed
+  - If the socket drops entirely, the app still works — all operations are REST-based, and the user can refresh to get current state
 
-## API Endpoints
+## What Was Hard and How I Worked Through It
 
-All protected endpoints require `Authorization: Bearer <accessToken>` header. The `/api` prefix is applied globally.
+### 1. Deterministic Rounding for Uneven Splits
 
-### Authentication
+**Problem:** When splitting ₹100 among 3 people, each person owes ₹33.33... but you can't pay a fraction of a paisa. naive rounding (33 + 33 + 33 = 99) loses a paisa. Rounding up for everyone (34 + 34 + 34 = 102) invents money.
 
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| POST | `/api/auth/register` | Public | Register a new user. Body: `{ name, email, password }` |
-| POST | `/api/auth/login` | Public | Login. Body: `{ email, password }`. Returns user + tokens |
-| POST | `/api/auth/refresh` | None | Refresh tokens. Body: `{ refreshToken }`. Rotates both tokens |
-| POST | `/api/auth/logout` | JWT | Revoke refresh token. Body: `{ refreshToken }` |
+**Solution:** Store everything in integer paise. For equal splits, compute `floor(total / count)` as the base, then distribute the remainder (`total - base * count`) to the first N participants by sorted user ID. This guarantees shares sum to the exact total with zero precision loss. The deterministic ordering (sorted user IDs) means the same split always produces the same result regardless of who requested it.
 
-### Users
+### 2. Refresh Token Rotation Without Breaking the UX
 
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| GET | `/api/users/me` | JWT | Get current user profile |
-| GET | `/api/users/search?q=query` | JWT | Search users by name or email (excludes self, limit 10) |
+**Problem:** Token rotation (invalidating the old refresh token on use) is more secure, but if two browser tabs both try to refresh at the same time, one will succeed and the other will fail because the token was already revoked.
 
-### Groups
+**Solution:** The frontend uses a mutex (`isRefreshing` flag) so only one refresh request goes out at a time. All other 401s are queued and retried once the new token arrives. This prevents the race condition while keeping the user logged in across tabs.
 
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| POST | `/api/groups` | JWT | Create a group. Body: `{ name }`. Creator becomes owner and first member |
-| GET | `/api/groups` | JWT | List all groups the user is a member of (with member/expense counts) |
-| GET | `/api/groups/:groupId` | JWT + Member | Get group details (members, expenses, activity) |
-| DELETE | `/api/groups/:groupId` | JWT + Owner | Delete group. Cascades to expenses, shares, settlements, activities, memberships |
-| POST | `/api/groups/:groupId/members` | JWT + Owner | Add member. Body: `{ email }`. Must be a registered user |
-| DELETE | `/api/groups/:groupId/members/:userId` | JWT + Owner | Remove member. Blocked if member has non-zero balance |
-| GET | `/api/groups/:groupId/members` | JWT + Member | List group members |
+### 3. WebSocket Event Scoping
 
-### Expenses
+**Problem:** In a multi-group app, you can't broadcast all events to all connected users — that would be a privacy leak and a performance disaster.
 
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| POST | `/api/groups/:groupId/expenses` | JWT + Member | Create expense. Body: `{ description, amount, paidById, expenseDate, splitType, participantIds?, shares? }` |
-| GET | `/api/groups/:groupId/expenses` | JWT + Member | List expenses. Query: `page`, `pageSize`, `sortBy` (createdAt/expenseDate/amount), `sortOrder` (asc/desc). Frontend provides sort dropdown |
-| GET | `/api/groups/:groupId/expenses/:expenseId` | JWT + Member | Get expense details with shares |
-| PATCH | `/api/groups/:groupId/expenses/:expenseId` | JWT + Creator/Owner | Update expense. Body: any subset of create fields |
-| DELETE | `/api/groups/:groupId/expenses/:expenseId` | JWT + Creator/Owner | Delete expense |
+**Solution:** Socket.IO rooms. Each group gets a room named `group:{groupId}`. The gateway verifies membership before allowing a client to join a room. Events are only emitted to the specific room. This gives us both security (only members see events) and performance (no wasted bandwidth on uninterested clients).
 
-### Balances
+### 4. Debt Simplification Algorithm
 
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| GET | `/api/groups/:groupId/balances` | JWT + Member | Get group balances (per-member net balance) and simplified debts |
-| GET | `/api/dashboard` | JWT | Get user's overall balance across all groups (totalOwed, totalYouOwe, netBalance, groupCount, topDebtGroup, recentActivity, per-group breakdown) |
-| GET | `/api/history` | JWT | Get personal expense/settlement history across all groups (sorted by date desc) |
+**Problem:** With many users in a group, the naive approach (every debtor pays every creditor individually) creates O(n²) transactions. For a group of 10 people, this could mean dozens of transfers.
 
-### Settlements
+**Solution:** A greedy matching algorithm: sort debtors by most-negative, creditors by most-positive, and match them greedily. This minimizes the number of transactions to at most n-1 (where n is the number of participants with non-zero balance). It's the same approach Splitwise uses.
 
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| POST | `/api/groups/:groupId/settlements` | JWT + Member | Record settlement. Body: `{ toUserId, amount }`. Validates no self-settlement, positive amount, and outstanding debt exists |
-| GET | `/api/groups/:groupId/settlements` | JWT + Member | List group settlements |
+### 5. Monorepo Setup Without Heavy Tooling
 
-### Activities
+**Problem:** Managing a backend and frontend as separate projects means duplicated configs, two `node_modules` directories, and no shared types.
 
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| GET | `/api/groups/:groupId/activities` | JWT + Member | Get activity feed. Query: `page`, `pageSize`. Returns reverse-chronological with actor info |
+**Solution:** npm workspaces. The root `package.json` declares `workspaces: ["apps/*"]`, so `npm install` installs everything in one go. Scripts in the root `package.json` use `concurrently` to run both apps in development. No Turborepo or Nx overhead — just native npm features.
 
-## Running with Docker (Production-like)
+## Known Issues / What Is Incomplete
 
-One command to start everything — frontend, backend, and database:
+### Security
 
-```bash
-docker compose up --build
-```
+- **Access token stored in localStorage:** While this avoids cookie-based CSRF, it's accessible to any XSS vulnerability. HttpOnly cookies would be more secure but require same-origin or careful CORS + cookie configuration.
+- **CORS wildcard on WebSocket gateway:** `cors: { origin: '*' }` is wide open. In production behind nginx this is fine (same origin), but for a real deployment it should be restricted.
+- **No rate limiting:** The login, registration, and refresh endpoints have no rate limiting, making brute-force attacks possible.
+- **JWT secrets in `.env` files:** The root `.gitignore` only ignores `.env` at the root level, not in `apps/api/` or `prisma/`. These files with secrets are tracked by git.
 
-- **Frontend:** http://localhost (served by nginx)
-- **Backend API:** http://localhost:3001 (proxied through nginx)
-- **PostgreSQL:** localhost:5432
+### Functionality
 
-The API container automatically runs Prisma migrations and seeds the database on first start.
+- **Dashboard WebSocket listeners are dead code:** The dashboard listens for group events like `group.expense.created`, but the client never joins any group room from the dashboard. These listeners never fire — the dashboard relies entirely on `refetchOnWindowFocus`.
+- **N+1 query in overall balance:** `getUserOverallBalance` calls `calculateGroupBalances` separately for each group, making 3N database queries for a user in N groups. Should be batched.
+- **No concurrent settlement protection:** Two simultaneous settlements could both see valid debt and both be created, over-settling. A `SELECT ... FOR UPDATE` lock would fix this.
 
-To stop and remove volumes:
+### Missing Features
 
-```bash
-docker compose down -v
-```
+- Only EQUAL and EXACT splits — no percentage-based splits
+- No recurring/subscription expenses
+- No push or email notifications
+- No expense receipts or file attachments
+- No user profile editing (name, password)
+- No forgot-password flow
+- No settlement undo/void
 
-## Running Locally (Development)
+### Test Coverage
 
-```bash
-# Start database
-docker compose up -d postgres
+Tests exist for `auth.service`, `expenses.service`, `groups.service`, and `balances.service`, but no tests for `settlements.service`, `activities.service`, `realtime.gateway`, or any controller-level integration tests.
 
-# Install dependencies
-npm install
+## What I Would Improve With More Time
 
-# Set up database
-cd prisma
-npx prisma migrate dev
-npx prisma generate
-cd ..
-npm run seed
+1. **Move tokens to HttpOnly cookies** — Eliminates XSS risk for tokens. Requires same-origin or proxy setup, but the nginx proxy already handles this in production.
+2. **Add rate limiting** — `@nestjs/throttler` on auth endpoints (e.g., 5 attempts/minute for login).
+3. **Fix the N+1 balance query** — Write a single SQL query or use Prisma's `$queryRaw` to calculate all group balances in one round trip.
+4. **Add percentage splits** — A third `SplitType` enum value with corresponding share calculation.
+5. **Database indexes** — Add indexes on `group_members(group_id)`, `group_members(user_id)`, `expenses(group_id)`, `settlements(group_id)`, and `activities(group_id)` for faster queries.
+6. **Add `SELECT ... FOR UPDATE` for settlements** — Prevent concurrent settlement over-creation.
+7. **Improve test coverage** — Add integration tests for controllers, WebSocket gateway tests, and settlement edge cases.
+8. **Add password reset flow** — Email-based reset with time-limited tokens.
+9. **Add push notifications** — WebSocket events are already there; adding browser push notifications would keep users informed when they're not on the page.
+10. **Fix the hardcoded Socket.IO URL** — Use an environment variable or derive from `window.location.origin` so it works in production.
 
-# Start development (both API and frontend)
-npm run dev
-```
+## Where I Used AI and What I Learned
 
-## Environment Variables
+### Where AI Was Used
 
-```env
-# Database
-DATABASE_URL="postgresql://postgres:postgres@localhost:5432/splitmate?schema=public"
+- **Code generation:** AI helped scaffold NestJS modules, controllers, services, and DTOs following NestJS conventions. It generated the initial Prisma schema and migration SQL.
+- **Algorithm design:** The debt simplification algorithm and the equal-split rounding logic were designed with AI assistance — verifying edge cases and ensuring correctness.
+- **Test writing:** AI generated the unit test suites for `auth.service`, `expenses.service`, `groups.service`, and `balances.service`, including edge cases I might have missed.
+- **Debugging:** AI helped diagnose issues like the refresh token race condition, WebSocket room scoping, and cascade delete behavior in Prisma.
+- **Documentation:** This README was written with AI assistance, pulling details from the actual codebase to ensure accuracy.
 
-# JWT (change these in production)
-JWT_ACCESS_SECRET="your-access-token-secret-change-in-production"
-JWT_REFRESH_SECRET="your-refresh-token-secret-change-in-production"
-ACCESS_TOKEN_EXPIRES_IN="15m"
-REFRESH_TOKEN_EXPIRES_IN="30d"
-
-# Server
-PORT=3001
-
-# Client
-CLIENT_URL="http://localhost:5173"
-```
-
-## Seed Data
-
-The seed script creates:
-- 3 users: Alice (alice@test.com), Bob (bob@test.com), Charlie (charlie@test.com) - all with password `Test1234`
-- A group "Goa Trip" with Alice as owner
-- A "Dinner" expense of ₹900 split equally (₹300 each)
